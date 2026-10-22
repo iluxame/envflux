@@ -51,9 +51,11 @@ async def main(config_path="config.yaml", dry_run=False):
         loop.add_signal_handler(sig, _signal_handler)
 
     config = load_config(config_path)
-    envoy_host = config["envoy"]["host"]
-    envoy_username = config["envoy"]["username"]
-    envoy_password = config["envoy"]["password"]
+    envoy_config = config["envoy"]
+    envoy_host = envoy_config["host"]
+    envoy_username = envoy_config.get("username")
+    envoy_password = envoy_config.get("password")
+    envoy_token = envoy_config.get("token")
     influx_url = config["influxdb"]["url"]
     influx_token = config["influxdb"]["token"]
     influx_org = config["influxdb"]["org"]
@@ -69,9 +71,15 @@ async def main(config_path="config.yaml", dry_run=False):
         logger.error(f"Failed to connect to Envoy during setup: {e}")
         sys.exit(1)
 
-    token_mgr = TokenManager(envoy)
-
-    await token_mgr.authenticate(envoy_username, envoy_password)
+    token_mgr = None
+    if envoy_token:
+        logger.info("Authenticating with configured Envoy token")
+        await envoy.authenticate(token=envoy_token)
+    else:
+        if not envoy_username or not envoy_password:
+            raise ValueError("Configure envoy.token or both envoy.username and envoy.password")
+        token_mgr = TokenManager(envoy)
+        await token_mgr.authenticate(envoy_username, envoy_password)
 
     influx_client = None
     write_api = None
@@ -83,7 +91,8 @@ async def main(config_path="config.yaml", dry_run=False):
 
     logger.info('Starting main loop')
     while not shutdown_event.is_set():
-        await token_mgr.refresh_if_needed()
+        if token_mgr:
+            await token_mgr.refresh_if_needed()
 
         try:
             data = await envoy.update()

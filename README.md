@@ -26,8 +26,13 @@ Create a `config.yaml` file with your connection settings:
 ```yaml
 envoy:
   host: 192.168.1.100
-  username: installer
-  password: your_password
+  # Use either a token, or username/password:
+  token: your_envoy_token
+  # username: installer
+  # password: your_password
+
+# Token-only authentication does not renew the token automatically. Replace it
+# when it expires. Username/password mode can obtain and refresh tokens for you.
 
 influxdb:
   url: http://localhost:8086
