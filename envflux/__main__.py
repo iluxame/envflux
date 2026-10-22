@@ -2,7 +2,6 @@ import asyncio
 import argparse
 import logging
 import signal
-import sys
 
 from influxdb_client import InfluxDBClient
 from influxdb_client.client.write_api import SYNCHRONOUS
@@ -18,6 +17,64 @@ from pyenphase import Envoy
 shutdown_event = asyncio.Event()
 logger = logging.getLogger(__name__)
 MAX_FAILED_POINTS = 10000
+
+
+def _configured_envoys(config):
+    entries = config.get("envoys")
+    if not isinstance(entries, list) or len(entries) != 2:
+        raise ValueError("Configure exactly two Envoy controllers in the envoys list")
+
+    controllers = []
+    names = set()
+    for index, entry in enumerate(entries, start=1):
+        if not isinstance(entry, dict):
+            raise ValueError(f"Envoy entry {index} must be a mapping")
+        host = entry.get("host")
+        name = str(entry.get("name") or host or f"envoy-{index}")
+        if not host:
+            raise ValueError(f"Envoy entry {name} is missing host")
+        if name in names:
+            raise ValueError(f"Duplicate Envoy name: {name}")
+        if not entry.get("token") and not (entry.get("username") and entry.get("password")):
+            raise ValueError(f"Envoy {name} needs a token or username and password")
+        names.add(name)
+        controllers.append({
+            "name": name,
+            "config": entry,
+            "client": None,
+            "token_manager": None,
+            "tracker": InverterUpdateTracker(),
+        })
+    return controllers
+
+
+async def _connect_envoy(controller):
+    config = controller["config"]
+    envoy = Envoy(config["host"])
+    try:
+        await envoy.setup()
+        token = config.get("token")
+        if token:
+            logger.info("Authenticating to Envoy %s with configured token", controller["name"])
+            await envoy.authenticate(token=token)
+            token_manager = None
+        else:
+            logger.info("Authenticating to Envoy %s with username and password", controller["name"])
+            token_manager = TokenManager(envoy, cache_key=controller["name"])
+            await token_manager.authenticate(config["username"], config["password"])
+        return envoy, token_manager
+    except Exception:
+        client = getattr(envoy, "_client", None)
+        if client and not client.closed:
+            await client.close()
+        raise
+
+
+async def _close_envoy(envoy):
+    client = getattr(envoy, "_client", None)
+    if client and not client.closed:
+        await client.close()
+
 
 def _signal_handler(sig=None, frame=None):
     logger.info("Shutdown signal received, stopping...")
@@ -51,35 +108,13 @@ async def main(config_path="config.yaml", dry_run=False):
         loop.add_signal_handler(sig, _signal_handler)
 
     config = load_config(config_path)
-    envoy_config = config["envoy"]
-    envoy_host = envoy_config["host"]
-    envoy_username = envoy_config.get("username")
-    envoy_password = envoy_config.get("password")
-    envoy_token = envoy_config.get("token")
+    controllers = _configured_envoys(config)
     influx_url = config["influxdb"]["url"]
     influx_token = config["influxdb"]["token"]
     influx_org = config["influxdb"]["org"]
     influx_bucket = config["influxdb"]["bucket"]
     failed_points_queue = FailedPointsQueue(MAX_FAILED_POINTS)
-    tracker = InverterUpdateTracker()
-
-    logger.info('Connecting to Envoy')
-    envoy: Envoy = Envoy(envoy_host)
-    try:
-        await envoy.setup()
-    except Exception as e:
-        logger.error(f"Failed to connect to Envoy during setup: {e}")
-        sys.exit(1)
-
-    token_mgr = None
-    if envoy_token:
-        logger.info("Authenticating with configured Envoy token")
-        await envoy.authenticate(token=envoy_token)
-    else:
-        if not envoy_username or not envoy_password:
-            raise ValueError("Configure envoy.token or both envoy.username and envoy.password")
-        token_mgr = TokenManager(envoy)
-        await token_mgr.authenticate(envoy_username, envoy_password)
+    logger.info("Configured %d Envoy controller(s)", len(controllers))
 
     influx_client = None
     write_api = None
@@ -91,20 +126,28 @@ async def main(config_path="config.yaml", dry_run=False):
 
     logger.info('Starting main loop')
     while not shutdown_event.is_set():
-        if token_mgr:
-            await token_mgr.refresh_if_needed()
+        for controller in controllers:
+            try:
+                if controller["client"] is None:
+                    logger.info("Connecting to Envoy %s", controller["name"])
+                    controller["client"], controller["token_manager"] = await _connect_envoy(controller)
 
-        try:
-            data = await envoy.update()
-            points = generate_points(data, tracker)
+                if controller["token_manager"]:
+                    await controller["token_manager"].refresh_if_needed()
 
-            for p in points:
-                logger.debug(f"Point: {p.to_line_protocol()}")
+                data = await controller["client"].update()
+                points = generate_points(data, controller["tracker"], controller["name"])
 
-            if not dry_run:
-                await influx_write_points_with_queue(write_api, influx_bucket, points, failed_points_queue)
-        except Exception as e:
-            logger.error(f"Failed to fetch or process data from Envoy: {e}")
+                for point in points:
+                    logger.debug("Point from %s: %s", controller["name"], point.to_line_protocol())
+
+                if not dry_run:
+                    await influx_write_points_with_queue(write_api, influx_bucket, points, failed_points_queue)
+            except Exception as e:
+                logger.error("Failed to fetch or process data from Envoy %s: %s", controller["name"], e)
+                await _close_envoy(controller["client"])
+                controller["client"] = None
+                controller["token_manager"] = None
 
         try:
             await asyncio.wait_for(shutdown_event.wait(), timeout=30)
@@ -117,10 +160,9 @@ async def main(config_path="config.yaml", dry_run=False):
         influx_client.close()
         logger.info("InfluxDB client closed")
 
-    # Close the aiohttp.ClientSession
-    if hasattr(envoy, "_client") and not envoy._client.closed:
-        await envoy._client.close()
-        logger.info("Envoy HTTP session closed")
+    for controller in controllers:
+        await _close_envoy(controller["client"])
+    logger.info("Envoy HTTP sessions closed")
 
     logger.info("Shutdown complete")
 

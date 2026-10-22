@@ -21,18 +21,20 @@ Envflux uses the [pyenphase](https://github.com/pyenphase/pyenphase) library to 
 
 ## Configuration
 
-Create a `config.yaml` file with your connection settings:
+Create a `config.yaml` file with your connection settings. Configure each Envoy
+under `envoys`; each controller needs its own host and token or credentials:
 
 ```yaml
-envoy:
-  host: 192.168.1.100
-  # Use either a token, or username/password:
-  token: your_envoy_token
-  # username: installer
-  # password: your_password
+envoys:
+  - name: main-array
+    host: 192.168.1.100
+    token: your_first_envoy_token
+  - name: added-array
+    host: 192.168.1.101
+    token: your_second_envoy_token
 
-# Token-only authentication does not renew the token automatically. Replace it
-# when it expires. Username/password mode can obtain and refresh tokens for you.
+# Token-only authentication does not renew tokens automatically. Replace each
+# token when it expires. Username/password mode can obtain and refresh tokens.
 
 influxdb:
   url: http://localhost:8086
@@ -40,6 +42,9 @@ influxdb:
   org: your_org
   bucket: envoy
 ```
+
+New points include a `gateway` tag so data from the two controllers remains
+distinguishable.
 
 ## Installation and Usage
 

@@ -3,6 +3,7 @@
 import json
 import logging
 import pathlib
+import re
 import time
 
 from platformdirs import user_cache_dir
@@ -20,9 +21,12 @@ class TokenManager:
     Handles loading, saving, validating, and refreshing tokens.
     """
 
-    def __init__(self, envoy, path=None, buffer_seconds=600):
+    def __init__(self, envoy, path=None, buffer_seconds=600, cache_key=None):
         self.envoy = envoy
         self.path = pathlib.Path(path) if path else DEFAULT_TOKEN_PATH
+        if not path and cache_key:
+            safe_key = re.sub(r"[^A-Za-z0-9_.-]", "_", cache_key)
+            self.path = self.path.with_name(f"{self.path.stem}-{safe_key}{self.path.suffix}")
         self.buffer_seconds = buffer_seconds
         self.token_data = self._load_token()
 

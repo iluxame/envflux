@@ -73,15 +73,26 @@ def create_ctmeter_phases_points(measurement, data):
 def create_system_phases_points(measurement, data):
     return [create_system_point(measurement, phase_data, phase) for phase, phase_data in data.items()]
 
-def generate_points(data, inverter_tracker):
+def generate_points(data, inverter_tracker, gateway=None):
     points = []
 
     # Helper Functions
     def add_point(measurement, datum, creator_func):
-        points.append(creator_func(measurement, datum))
+        if datum is None:
+            return
+        point = creator_func(measurement, datum)
+        if gateway:
+            point.tag("gateway", gateway)
+        points.append(point)
 
     def add_phase_points(measurement, datum, creator_func):
-        points.extend(creator_func(measurement, datum))
+        if not datum:
+            return
+        phase_points = creator_func(measurement, datum)
+        if gateway:
+            for point in phase_points:
+                point.tag("gateway", gateway)
+        points.extend(phase_points)
 
     # Configurable point mappings
     single_ctmeter_sources = [
@@ -128,7 +139,7 @@ def generate_points(data, inverter_tracker):
         previously_seen = inverter_tracker.has_seen(serial_number)
 
         if inverter_tracker.should_update(serial_number, last_report_date):
-            points.append(create_inverter_point('inverters', inverter_data))
+            add_point('inverters', inverter_data, create_inverter_point)
             if previously_seen:
                 inverter_new_data.append(serial_number)
 
